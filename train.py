@@ -11,11 +11,13 @@ To use train.py, you will require to set the following parameters :
 """
 import pathlib
 import sys
-sys.path.append(str(pathlib.Path().absolute()))
+#sys.path.append(str(pathlib.Path().absolute()))
+sys.path.append("/content/digit_sequence_recognition")
 import tensorflow as tf
 from models import resnet
 import datasets.data as data
 import utils.configuration as conf
+import utils.imgproc as imgproc
 import utils.losses as losses
 import numpy as np
 import argparse
@@ -25,14 +27,14 @@ if __name__ == '__main__' :
     parser = argparse.ArgumentParser(description = "Train a simple mnist model")
     parser.add_argument("-config", type = str, help = "<str> configuration file", required = True)
     parser.add_argument("-name", type=str, help=" name of section in the configuration file", required = True)
-    parser.add_argument("-mode", type=str, choices=['train', 'test'],  help=" train or test", required = False, default = 'train')
+    parser.add_argument("-mode", type=str, choices=['train', 'test', 'predict'],  help=" train or test", required = False, default = 'train')
     parser.add_argument("-save", type= bool,  help=" True to save the model", required = False, default = False)    
     pargs = parser.parse_args()     
     configuration_file = pargs.config
     configuration = conf.ConfigurationFile(configuration_file, pargs.name)                   
     if pargs.mode == 'train' :
         tfr_train_file = os.path.join(configuration.get_data_dir(), "train.tfrecords")
-    if pargs.mode == 'train' or  pargs.mode == 'test':    
+    if pargs.mode == 'train' or  pargs.mode == 'test' or pargs.mode == 'predict':    
         tfr_test_file = os.path.join(configuration.get_data_dir(), "test.tfrecords")
     if configuration.use_multithreads() :
         if pargs.mode == 'train' :
@@ -53,21 +55,17 @@ if __name__ == '__main__' :
     if pargs.mode == 'train' : 
         tr_dataset = tf.data.TFRecordDataset(tfr_train_file)        
         tr_dataset = tr_dataset.shuffle(configuration.get_shuffle_size())
-        tr_dataset = tr_dataset.map(lambda x : data.parser_tfrecord(x, input_shape, mean_image, number_of_classes, with_augmentation = True));        
+        tr_dataset = tr_dataset.map(lambda x : data.parser_tfrecord(x, input_shape, mean_image, number_of_classes, with_augmentation = False));        
         tr_dataset = tr_dataset.batch(batch_size = configuration.get_batch_size())    
         
 
-    if pargs.mode == 'train' or  pargs.mode == 'test':
+    if pargs.mode == 'train' or  pargs.mode == 'test'  or  pargs.mode == 'predict':
         val_dataset = tf.data.TFRecordDataset(tfr_test_file)
         val_dataset = val_dataset.map(lambda x : data.parser_tfrecord(x, input_shape, mean_image, number_of_classes, with_augmentation = False));    
         val_dataset = val_dataset.batch(batch_size = configuration.get_batch_size())
                         
-    #this code allows program to run in  multiple GPUs. It was tested with 2 gpus.
-    #tf.debugging.set_log_device_placement(True)
-    #strategy = tf.distribute.MirroredStrategy()
-    #with strategy.scope():
-    #callback    
-    tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=configuration.get_snapshot_dir(), histogram_freq=1)
+        
+    #tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=configuration.get_snapshot_dir(), histogram_freq=1)
     #Defining callback for saving checkpoints
     #save_freq: frequency in terms of number steps each time checkpoint is saved 
     model_checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
@@ -77,11 +75,18 @@ if __name__ == '__main__' :
         monitor='val_acc',
         save_freq = 'epoch',            
         )
-    #save_freq = configuration.get_snapshot_steps())        
-    #resnet 34, no bottleneck is required            
-    #model = resnet.ResNet([3,4,6,3],[64,128,256,512], configuration.get_number_of_classes(), se_factor = 0)
-    #resnet_50
-    model = resnet.ResNet([3,4,6,3],[64,128,256,512], configuration.get_number_of_classes(), use_bottleneck = True)
+    
+    #save_freq = configuration.get_snapshot_steps())                
+    if configuration.get_model_name() == 'SKETCH' :
+        #model = alexnet.AlexNetModel(configuration.get_number_of_classes())            
+        process_fun = imgproc.process_sketch
+    else:
+        #model = resnet.RecogNet(configuration.get_number_of_classes())
+        process_fun = imgproc.process_mnist    
+    
+    
+    
+    model = resnet.RecogNet([3,4,6,3],[32,64,128,256], configuration.get_number_of_classes(), use_bottleneck = False)
     print('Model is Resnet')
     sys.stdout.flush()    
     #build the model indicating the input shape
@@ -95,17 +100,17 @@ if __name__ == '__main__' :
         #model.load_weights(configuration.get_checkpoint_file(), by_name = False)
     #defining optimizer, my experience shows that SGD + cosine decay is a good starting point        
     #recommended learning_rate is 0.1, and decay_steps = total_number_of_steps                        
-    initial_learning_rate= configuration.get_learning_rate()
-    lr_schedule = tf.keras.experimental.CosineDecay(initial_learning_rate = initial_learning_rate,
-                                                    decay_steps = configuration.get_decay_steps(),
-                                                    alpha = 0.0001)
+    #initial_learning_rate= configuration.get_learning_rate()
+    #lr_schedule = tf.keras.experimental.CosineDecay(initial_learning_rate = initial_learning_rate,
+    #                                                decay_steps = configuration.get_decay_steps(),
+    #                                                alpha = 0.0001)
 
-    opt = tf.keras.optimizers.SGD(learning_rate = lr_schedule, momentum = 0.9, nesterov = True)        
-    #opt = tf.keras.optimizers.Adam(learning_rate = configuration.get_learning_rate())
+    #opt = tf.keras.optimizers.SGD(learning_rate = lr_schedule, momentum = 0.9, nesterov = True)        
+    opt = tf.keras.optimizers.Adam(learning_rate = configuration.get_learning_rate())
     model.compile(
          optimizer=opt, 
         #optimizer=tf.keras.optimizers.Adam(learning_rate = configuration.get_learning_rate()), # 'adam'     
-          loss= losses.crossentropy_loss,
+          loss= losses.multiple_crossentropy_loss,
           metrics=['accuracy'])
  
     if pargs.mode == 'train' :                             
@@ -117,10 +122,36 @@ if __name__ == '__main__' :
                 
     elif pargs.mode == 'test' :
         model.evaluate(val_dataset,
-                       steps = configuration.get_validation_steps(),
-                       callbacks=[tensorboard_callback])                                               
+                       steps = configuration.get_validation_steps()) 
+        
+    elif pargs.mode == 'predict2':
+      filename = input('file :')
+      while(filename != 'end') :
+          target_size = (configuration.get_image_height(), configuration.get_image_width())
+          image = process_fun(data.read_image(filename, configuration.get_number_of_channels()), target_size )
+          image = image - mean_image
+          image = tf.expand_dims(image, 0)        
+          pred = model.predict(image)
+          pred = pred[0]
+          #softmax to estimate probs
+          pred = np.exp(pred - max(pred))
+          pred = pred / np.sum(pred)            
+          cla = np.argmax(pred)
+          print('{} [{}]'.format(cla, pred[cla]))
+          filename = input('file2 :')
+   
+    elif pargs.mode == 'predict':
+        resultado=model.predict (val_dataset,
+                       steps = configuration.get_validation_steps()) 
+        #print(resultado.shape)
+        print(np.argmax(resultado[0][0], axis=-1))
+        for resultado in val_dataset.take(1):
+          sample_label = resultado[1]
+        print(np.argmax(sample_label[0][0], axis=-1))
+
     #save the model   
     if pargs.save :
         saved_to = os.path.join(configuration.get_data_dir(),"cnn-model")
         model.save(saved_to)
-        print("model saved to {}".format(saved_to))                    
+        print("model saved to {}".format(saved_to))               
+         
